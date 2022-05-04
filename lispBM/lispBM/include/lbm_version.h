@@ -23,11 +23,41 @@
 /** LBM major version */
 #define LBM_MAJOR_VERSION 0
 /** LBM minor version */
-#define LBM_MINOR_VERSION 4
+#define LBM_MINOR_VERSION 5
 /** LBM patch revision */
 #define LBM_PATCH_VERSION 2
 
 /*! \page changelog Changelog
+
+May 1 2022: Version 0.5.2
+ - Added lbm_stack_reserve for allocating multiple words on stack
+   in one function call (and one check on stack limits).
+
+Apr 19 2022: Version 0.5.2
+ - Added a reader_done_callback that is run when a context is done
+   with a reading task.
+ - Array-literal syntax.
+ - Restructure symbol evaluation for efficiency and readability.
+ - Rewrite progn to update stack in place when possible.
+ - Removed a bunch of convertion back and forth from C and LBM representation
+   of continuation identifiers in eval_cps. They are now compared in encoded
+   form in the evaluator.
+ - Added lbm_cadr and replaced lbm_car(lbm_cdr(x)) with lbm_cadr(x) in
+   the evaluator.
+
+Apr 10 2022: Version 0.5.1
+ - Removed the prelude.lisp, prelude.xxd step of building LBM.
+ - A continuation created by call-cc can be applied to 0 or 1 argument.
+   If there are 0 arguments an implicit application to nil takes place.
+
+Mar 26 2022: Version (0.5.0)
+ - Optimized code-path for closure applications.
+ - 64 and 32 bit support from a single source code
+ - Added math extensions library from Benjamin Vedder
+ - Added String manipulation extensions library from Benjamin Vedder
+
+Mar 10 2022: Version (0.4.2)
+ - Added the lbm_set_error_reason function.
 
 Mar 02 2022: Version (0.4.2)
  - Bug fix in initialization of contexts.

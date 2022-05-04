@@ -35,6 +35,8 @@ package_dict["60_MK4"] = [['60_mk4', default_name],
                     ['60_mk4_no_limits', no_limits_name]]
 package_dict["60_MK5"] = [['60_mk5', default_name],
                     ['60_mk5_no_limits', no_limits_name]]
+package_dict["60_MK6"] = [['60_mk6', default_name],
+                    ['60_mk6_no_limits', no_limits_name]]
 package_dict["DAS_RS"] = [['das_rs', default_name]]
 package_dict["75_300"] = [['75_300', default_name],
                     ['75_300_no_limits', no_limits_name]]
@@ -84,6 +86,7 @@ package_dict["100_500"] = [['100_500', default_name],
 package_dict["75_600"] = [['75_600', default_name],
                     ['75_600_no_limits', no_limits_name]]
 package_dict["60v2_alva"] = [['60v2_alva', default_name]]
+package_dict["60v2_alva_mk2"] = [['60v2_alva_mk2', default_name]]
 package_dict["60_75"] = [['60_75', default_name],
                     ['60_75_no_limits', no_limits_name]]
 

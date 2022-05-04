@@ -1,5 +1,5 @@
 /*
-	Copyright 2016 - 2020 Benjamin Vedder	benjamin@vedder.se
+	Copyright 2016 - 2022 Benjamin Vedder	benjamin@vedder.se
 
 	This file is part of the VESC firmware.
 
@@ -26,6 +26,8 @@
   #define HW_NAME					"60_MK4"
 #elif defined(HW60_IS_MK5)
   #define HW_NAME					"60_MK5"
+#elif defined(HW60_IS_MK6)
+  #define HW_NAME					"60_MK6"
 #elif defined(HW60_IS_MK1)
   #define HW_NAME					"60"
 #else
@@ -39,7 +41,7 @@
 #define HW_HAS_DRV8301
 #define HW_HAS_3_SHUNTS
 #define HW_HAS_PHASE_SHUNTS
-#if !defined(HW60_IS_MK3) && !defined(HW60_IS_MK4) && !defined(HW60_IS_MK5)
+#if !defined(HW60_IS_MK3) && !defined(HW60_IS_MK4) && !defined(HW60_IS_MK5) && !defined(HW60_IS_MK6)
 #define HW_HAS_PERMANENT_NRF
 #endif
 
@@ -63,7 +65,7 @@
 #define CURRENT_FILTER_ON()		palSetPad(GPIOD, 2)
 #define CURRENT_FILTER_OFF()	palClearPad(GPIOD, 2)
 
-#ifdef HW60_IS_MK5
+#if defined(HW60_IS_MK5) || defined(HW60_IS_MK6)
 #define HW_HAS_PHASE_FILTERS
 #define PHASE_FILTER_GPIO		GPIOC
 #define PHASE_FILTER_PIN		13
@@ -71,7 +73,15 @@
 #define PHASE_FILTER_OFF()		palClearPad(PHASE_FILTER_GPIO, PHASE_FILTER_PIN)
 #endif
 
-#if defined(HW60_IS_MK3) || defined(HW60_IS_MK4) || defined(HW60_IS_MK5)
+// Sensor port voltage control
+#if defined(HW60_IS_MK6)
+#define SENSOR_VOLTAGE_GPIO		GPIOA
+#define SENSOR_VOLTAGE_PIN		4
+#define SENSOR_PORT_5V()		palSetPad(SENSOR_VOLTAGE_GPIO, SENSOR_VOLTAGE_PIN)
+#define SENSOR_PORT_3V3()		palClearPad(SENSOR_VOLTAGE_GPIO, SENSOR_VOLTAGE_PIN)
+#endif
+
+#if defined(HW60_IS_MK3) || defined(HW60_IS_MK4) || defined(HW60_IS_MK5) || defined(HW60_IS_MK6)
 // Shutdown pin
 #define HW_SHUTDOWN_GPIO		GPIOC
 #define HW_SHUTDOWN_PIN			5
@@ -118,26 +128,28 @@
  * 14:	IN1		SENS2
  */
 
-#define HW_ADC_CHANNELS			15
 #define HW_ADC_INJ_CHANNELS		3
 #define HW_ADC_NBR_CONV			5
+#define HW_ADC_CHANNELS			(HW_ADC_NBR_CONV * 3)
 
 // ADC Indexes
-#define ADC_IND_SENS1			0
-#define ADC_IND_SENS2			1
-#define ADC_IND_SENS3			2
-#define ADC_IND_CURR1			3
-#define ADC_IND_CURR2			4
-#define ADC_IND_CURR3			5
+#define ADC_IND_SENS1			3
+#define ADC_IND_SENS2			4
+#define ADC_IND_SENS3			5
+#define ADC_IND_CURR1			0
+#define ADC_IND_CURR2			1
+#define ADC_IND_CURR3			2
 #define ADC_IND_VIN_SENS		11
 #define ADC_IND_EXT				6
 #define ADC_IND_EXT2			7
 #define ADC_IND_TEMP_MOS		8
 #define ADC_IND_TEMP_MOTOR		9
 #define ADC_IND_VREFINT			12
-#if defined(HW60_IS_MK3) || defined(HW60_IS_MK4) || defined(HW60_IS_MK5)
+#if defined(HW60_IS_MK3) || defined(HW60_IS_MK4) || defined(HW60_IS_MK5) || defined(HW60_IS_MK6)
 #define ADC_IND_SHUTDOWN		10
 #endif
+
+//#define ADC_IND_I_OVERSAMP		15
 
 // -------- Current sensor test
 #if 0
@@ -226,7 +238,7 @@
 #define HW_UART_RX_PORT			GPIOB
 #define HW_UART_RX_PIN			11
 
-#if defined(HW60_IS_MK3) || defined(HW60_IS_MK4) || defined(HW60_IS_MK5)
+#if defined(HW60_IS_MK3) || defined(HW60_IS_MK4) || defined(HW60_IS_MK5) || defined(HW60_IS_MK6)
 // Permanent UART Peripheral (for NRF51)
 #define HW_UART_P_BAUD			115200
 #define HW_UART_P_DEV			SD4
@@ -274,7 +286,7 @@
 #define HW_ENC_TIM_ISR_CH		TIM3_IRQn
 #define HW_ENC_TIM_ISR_VEC		TIM3_IRQHandler
 
-#if !defined(HW60_IS_MK3) && !defined(HW60_IS_MK4) && !defined(HW60_IS_MK5)
+#if !defined(HW60_IS_MK3) && !defined(HW60_IS_MK4) && !defined(HW60_IS_MK5) || defined(HW60_IS_MK6)
 // NRF pins
 #define NRF_PORT_CSN			GPIOB
 #define NRF_PIN_CSN				12
@@ -287,7 +299,7 @@
 #endif
 
 // SPI pins
-#if !defined(HW60_IS_MK5)
+#if !defined(HW60_IS_MK5) && !defined(HW60_IS_MK6)
 #define HW_SPI_DEV				SPID1
 #define HW_SPI_GPIO_AF			GPIO_AF_SPI1
 #define HW_SPI_PORT_NSS			GPIOA
@@ -312,7 +324,7 @@
 #endif
 
 // SPI for DRV8301
-#if !defined(HW60_IS_MK3) && !defined(HW60_IS_MK4) && !defined(HW60_IS_MK5)
+#if !defined(HW60_IS_MK3) && !defined(HW60_IS_MK4) && !defined(HW60_IS_MK5) && !defined(HW60_IS_MK6)
 #define DRV8301_MOSI_GPIO		GPIOC
 #define DRV8301_MOSI_PIN		12
 #define DRV8301_MISO_GPIO		GPIOC
@@ -333,12 +345,23 @@
 #endif
 
 // MPU9250
-#if !defined(HW60_IS_MK4) && !defined(HW60_IS_MK5)
+#if !defined(HW60_IS_MK4) && !defined(HW60_IS_MK5) && !defined(HW60_IS_MK6)
 #define MPU9X50_SDA_GPIO		GPIOB
 #define MPU9X50_SDA_PIN			2
 #define MPU9X50_SCL_GPIO		GPIOA
 #define MPU9X50_SCL_PIN			15
 #define IMU_FLIP
+#elif defined(HW60_IS_MK6)
+#define BMI160_SPI_PORT_NSS		GPIOA
+#define BMI160_SPI_PIN_NSS		15
+#define BMI160_SPI_PORT_SCK		GPIOC
+#define BMI160_SPI_PIN_SCK		15
+#define BMI160_SPI_PORT_MOSI	GPIOB
+#define BMI160_SPI_PIN_MOSI		2
+#define BMI160_SPI_PORT_MISO	GPIOB
+#define BMI160_SPI_PIN_MISO		12
+#define IMU_FLIP
+#define IMU_ROT_180
 #else
 #define BMI160_SDA_GPIO			GPIOB
 #define BMI160_SDA_PIN			2
@@ -371,6 +394,9 @@
 #ifndef MCCONF_DEFAULT_MOTOR_TYPE
 #define MCCONF_DEFAULT_MOTOR_TYPE		MOTOR_TYPE_FOC
 #endif
+#ifndef MCCONF_FOC_F_ZV
+#define MCCONF_FOC_F_ZV					30000.0
+#endif
 #ifndef MCCONF_L_MAX_ABS_CURRENT
 #define MCCONF_L_MAX_ABS_CURRENT		150.0	// The maximum absolute current above which a fault is generated
 #endif
@@ -389,7 +415,7 @@
 #define HW_LIM_TEMP_FET			-40.0, 110.0
 
 // Functions
-#if defined(HW60_IS_MK3) || defined(HW60_IS_MK4) || defined(HW60_IS_MK5)
+#if defined(HW60_IS_MK3) || defined(HW60_IS_MK4) || defined(HW60_IS_MK5) || defined(HW60_IS_MK6)
 bool hw_sample_shutdown_button(void);
 #endif
 

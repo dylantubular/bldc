@@ -142,7 +142,8 @@ CSRC = $(STARTUPSRC) \
        ledpwm.c \
        mcpwm.c \
        servo_dec.c \
-       utils.c \
+       utils_math.c \
+       utils_sys.c \
        servo_simple.c \
        packet.c \
        terminal.c \
@@ -174,7 +175,8 @@ CSRC = $(STARTUPSRC) \
        $(LZOSRC) \
        $(BLACKMAGICSRC) \
        qmlui/qmlui.c \
-       $(ENCSRC)
+       $(ENCSRC) \
+       foc_math.c
 
 ifeq ($(USE_LISPBM),1)
   CSRC += $(LISPBMSRC)

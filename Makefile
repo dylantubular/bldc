@@ -151,7 +151,7 @@ fw_$(1)_vescfw: $(eval HW_SRC_FILE = $(call FIND_TARGET_C_CODE,$(1),$(HW_DIR))) 
 fw_$(1)_vescfw:
 	@echo "********* BUILD: $(1) **********"
 	$(V1) $(MKDIR) $(BUILD_DIR)/$(1)
-	$(V1) make -f $(MAKE_DIR)/fw.mk \
+	$(V1) $$(MAKE) -f $(MAKE_DIR)/fw.mk \
 		TCHAIN_PREFIX="$(ARM_SDK_PREFIX)" \
 		BUILDDIR="$(2)" \
 		PROJECT="$(3)" \
@@ -173,8 +173,10 @@ fw_$(1)_clean:
 	$(V0) @echo " CLEAN      $$@"
 ifneq ($(OSFAMILY), windows)
 	$(V1) [ ! -d "$(BUILD_DIR)/$(1)" ] || $(RM) -r "$(BUILD_DIR)/$(1)"
+	$(V1) [ ! -d "$(ROOT_DIR)/.dep" ] || $(RM) -r "$(ROOT_DIR)/.dep"
 else
-	$(V1) pwsh -noprofile -command if (Test-Path $(BUILD_DIR)/$(1)) {Remove-Item -Recurse $(BUILD_DIR)/$(1)}
+	$(V1) powershell -noprofile -command "& {if (Test-Path $(BUILD_DIR)/$(1)) {Remove-Item -Recurse $(BUILD_DIR)/$(1)}}"
+	$(V1) powershell -noprofile -command "& {if (Test-Path $(ROOT_DIR)/.dep) {Remove-Item -Recurse $(ROOT_DIR)/.dep}}"
 endif
 endef
 
@@ -219,7 +221,7 @@ all_fw_package: all_fw all_fw_package_clean
 	$(V0) @echo " PACKAGE        $(ROOT_DIR)/package/*"
 
 # Place all firmware files into `./package` directory
-	$(V1) python3 package_firmware.py
+	$(V1) $(PYTHON) package_firmware.py
 
 # Find all the leftover object and lst files
 	$(eval BUILD_CRUFT := $(call rwildcard,$(ROOT_DIR)/build,*.lst *.o))
@@ -228,7 +230,7 @@ all_fw_package: all_fw all_fw_package_clean
 ifneq ($(OSFAMILY), windows)
 	$(V1) $(RM) $(BUILD_CRUFT)
 else
-	$(V1) pwsh -noprofile -command {Remove-Item $(BUILD_CRUFT)}
+	$(V1) powershell -noprofile -command "& {Remove-Item $(BUILD_CRUFT)}"
 endif
 
 .PHONY: all_fw_package_clean
@@ -237,7 +239,7 @@ all_fw_package_clean:
 ifneq ($(OSFAMILY), windows)
 	$(V1) [ ! -d "$(ROOT_DIR)/package/" ] || $(RM) -rf $(ROOT_DIR)/package/*
 else
-	$(V1) pwsh -noprofile -command if (Test-Path $(ROOT_DIR)/package/*) {Remove-Item -Recurse $(ROOT_DIR)/package/*}
+	$(V1) powershell -noprofile -command "& {if (Test-Path $(ROOT_DIR)/package/*) {Remove-Item -Recurse $(ROOT_DIR)/package/*}}"
 endif
 
 
@@ -247,12 +249,12 @@ endif
 #
 ##############################
 
-ALL_UNITTESTS := utils
+ALL_UNITTESTS := utils_math
 
 UT_OUT_DIR := $(BUILD_DIR)/unit_tests
 
 $(UT_OUT_DIR):
-	$(V1) mkdir -p $@
+	$(V1) $(MKDIR) $@
 
 .PHONY: all_ut
 all_ut: $(addsuffix _elf, $(addprefix ut_, $(ALL_UNITTESTS))) $(ALL_PYTHON_UNITTESTS)
@@ -281,7 +283,7 @@ ut_$(1)_%: TARGET=$(1)
 ut_$(1)_%: OUTDIR=$(UT_OUT_DIR)/$$(TARGET)
 ut_$(1)_%: UT_ROOT_DIR=$(ROOT_DIR)/tests/$(1)
 ut_$(1)_%: $$(UT_OUT_DIR)
-	$(V1) mkdir -p $(UT_OUT_DIR)/$(1)
+	$(V1) $(MKDIR) $(UT_OUT_DIR)/$(1)
 	$(V1) cd $$(UT_ROOT_DIR) && \
 		$$(MAKE) -r --no-print-directory \
 		BUILD_TYPE=ut \

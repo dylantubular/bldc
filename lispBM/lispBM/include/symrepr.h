@@ -67,36 +67,44 @@
 #define SYM_RECOVERED     0x28
 
 
+#define TYPE_CLASSIFIER_STARTS 0x30
 #define SYM_ARRAY_TYPE     0x30
-#define SYM_BOXED_I_TYPE   0x31
-#define SYM_BOXED_U_TYPE   0x32
-#define SYM_BOXED_F_TYPE   0x33
-#define SYM_STREAM_TYPE    0x34
-#define SYM_BYTECODE_TYPE  0x37
-#define SYM_NONSENSE       0x38
+#define SYM_RAW_I_TYPE     0x31
+#define SYM_RAW_U_TYPE     0x32
+#define SYM_RAW_F_TYPE     0x33
+#define SYM_IND_I_TYPE     0x34
+#define SYM_IND_U_TYPE     0x35
+#define SYM_IND_F_TYPE     0x36
+#define SYM_STREAM_TYPE    0x37
+#define SYM_BYTECODE_TYPE  0x38
+#define TYPE_CLASSIFIER_ENDS 0x38
+#define SYM_NONSENSE       0x39
 
-#define SYM_NO_MATCH       0x39
-#define SYM_MATCH_ANY      0x3A
-#define SYM_MATCH_I28      0x3B
-#define SYM_MATCH_U28      0x3C
-#define SYM_MATCH_U32      0x3D
-#define SYM_MATCH_I32      0x3E
-#define SYM_MATCH_FLOAT    0x3F
-#define SYM_MATCH_CONS     0x40
+#define SYM_NO_MATCH       0x3A
+#define SYM_MATCH_ANY      0x3B
+#define SYM_MATCH_I        0x3C
+#define SYM_MATCH_U        0x3D
+#define SYM_MATCH_U32      0x3E
+#define SYM_MATCH_I32      0x3F
+#define SYM_MATCH_FLOAT    0x40
+#define SYM_MATCH_CONS     0x41
 
 // Type identifying symbols
 #define SYM_TYPE_LIST      0x50
-#define SYM_TYPE_I28       0x51
-#define SYM_TYPE_U28       0x52
+#define SYM_TYPE_I         0x51
+#define SYM_TYPE_U         0x52
 #define SYM_TYPE_FLOAT     0x53
 #define SYM_TYPE_I32       0x54
 #define SYM_TYPE_U32       0x55
-#define SYM_TYPE_ARRAY     0x56
-#define SYM_TYPE_SYMBOL    0x57
-#define SYM_TYPE_CHAR      0x58
-#define SYM_TYPE_BYTE      0x59
-#define SYM_TYPE_REF       0x5A
-#define SYM_TYPE_STREAM    0x5B
+#define SYM_TYPE_DOUBLE    0x56
+#define SYM_TYPE_I64       0x57
+#define SYM_TYPE_U64       0x58
+#define SYM_TYPE_ARRAY     0x59
+#define SYM_TYPE_SYMBOL    0x5A
+#define SYM_TYPE_CHAR      0x5B
+#define SYM_TYPE_BYTE      0x5C
+#define SYM_TYPE_REF       0x5D
+#define SYM_TYPE_STREAM    0x5E
 
 //Relevant for the tokenizer
 #define SYM_OPENPAR        0x70
@@ -142,6 +150,7 @@
 #define SYM_ARRAY_READ          0x130
 #define SYM_ARRAY_WRITE         0x131
 #define SYM_ARRAY_CREATE        0x132
+#define SYM_ARRAY_SIZE          0x133
 
 #define SYM_SYMBOL_TO_STRING    0x140
 #define SYM_STRING_TO_SYMBOL    0x141
@@ -149,6 +158,11 @@
 #define SYM_UINT_TO_SYMBOL      0x143
 #define SYM_SET_CAR             0x145
 #define SYM_SET_CDR             0x146
+#define SYM_SET_IX              0x147
+
+#define SYM_ASSOC               0x148
+#define SYM_ACONS               0x149
+#define SYM_SET_ASSOC           0x14A
 
 #define SYM_IS_FUNDAMENTAL      0x150
 
@@ -157,6 +171,16 @@
 #define SYM_ENCODE_U32          0x153
 #define SYM_ENCODE_FLOAT        0x154
 #define SYM_DECODE              0x155
+
+#define SYM_TO_I                0x160
+#define SYM_TO_I32              0x161
+#define SYM_TO_U                0x162
+#define SYM_TO_U32              0x163
+#define SYM_TO_FLOAT            0x164
+#define SYM_TO_I64              0x165
+#define SYM_TO_U64              0x166
+#define SYM_TO_DOUBLE           0x167
+#define SYM_TO_BYTE             0x168
 
 //#define SYM_STREAM_GET          0x160
 //#define SYM_STREAM_MORE         0x161
@@ -246,6 +270,6 @@ extern int lbm_get_num_variables(void);
  *
  * \return The amount of space occupied by the symbol table in bytes.
  */
-extern unsigned int lbm_get_symbol_table_size(void);
+extern lbm_uint lbm_get_symbol_table_size(void);
 
 #endif

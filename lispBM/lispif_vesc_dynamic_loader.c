@@ -23,60 +23,60 @@
 static const char* functions[] = {
 "(defun uart-read-bytes (buffer n ofs)"
 "(let ((rd (uart-read buffer n ofs)))"
-"(if (num-eq rd n)"
-"(bufset-u8 buffer 0 (+ ofs rd))"
+"(if (= rd n)"
+"(bufset-u8 buffer (+ ofs rd) 0)"
 "(progn (yield 4000) (uart-read-bytes buffer (- n rd) (+ ofs rd)))"
 ")))",
 
 "(defun uart-read-until (buffer n ofs end)"
 "(let ((rd (uart-read buffer n ofs end)))"
-"(if (and (> rd 0) (or (num-eq rd n) (num-eq (bufget-u8 buffer (+ ofs (- rd 1))) end)))"
-"(bufset-u8 buffer 0 (+ ofs rd))"
+"(if (and (> rd 0) (or (= rd n) (= (bufget-u8 buffer (+ ofs (- rd 1))) end)))"
+"(bufset-u8 buffer (+ ofs rd) 0)"
 "(progn (yield 10000) (uart-read-until buffer (- n rd) (+ ofs rd) end))"
 ")))",
 
 "(defun map (f lst)"
-"(if (= lst nil) nil "
+"(if (eq lst nil) nil "
 "(cons (f (car lst)) (map f (cdr lst)))))",
 
 "(defun iota (n)"
 "(let ((iacc (lambda (acc i)"
 "(if (< i 0) acc (iacc (cons i acc) (- i 1))))))"
-"(iacc nil n)))",
+"(iacc nil (- n 1))))",
 
 "(defun range (start end)"
 "(map (lambda (x) (+ x start)) (iota (- end start))))",
 
 "(defun foldl (f init lst)"
-"(if (= lst nil) init (foldl f (f init (car lst)) (cdr lst))))",
+"(if (eq lst nil) init (foldl f (f init (car lst)) (cdr lst))))",
 
 "(defun foldr (f init lst)"
-"(if (= lst nil) init (f (car lst) (foldr f init (cdr lst)))))",
+"(if (eq lst nil) init (f (car lst) (foldr f init (cdr lst)))))",
 
 "(defun reverse (lst)"
 "(let ((revacc (lambda (acc lst)"
-"(if (= nil lst) acc (revacc (cons (car lst) acc) (cdr lst))))))"
+"(if (eq nil lst) acc (revacc (cons (car lst) acc) (cdr lst))))))"
 "(revacc nil lst)))",
 
 "(defun length (lst)"
 "(let ((len (lambda (l lst)"
-"(if (= lst nil) l (len (+ l 1) (cdr lst))))))"
+"(if (eq lst nil) l (len (+ l 1) (cdr lst))))))"
 "(len 0 lst)))",
 
 "(defun apply (f lst) (eval `(,f ,@lst)))",
 
 "(defun zipwith (f x y)"
 "(let ((map-rec (lambda (f res lst ys)"
-"(if (= lst nil)"
+"(if (eq lst nil)"
 "(reverse res)"
 "(map-rec f (cons (f (car lst) (car ys)) res) (cdr lst) (cdr ys))))))"
 "(map-rec f nil x y)))",
 
-"(defun sleep (seconds) (yield (* seconds 1000000)))",
+"(defun sleep (seconds) (yield (* seconds 1000000.0)))",
 
 "(defun filter (f lst)"
 "(let ((filter-rec (lambda (f lst ys)"
-"(if (= lst nil)"
+"(if (eq lst nil)"
 "(reverse ys)"
 "(if (f (car lst))"
 "(filter-rec f (cdr lst) (cons (car lst) ys))"
@@ -88,17 +88,39 @@ static const char* functions[] = {
 
 "(defun sort (f lst)"
 "(let ((insert (lambda (elt f sorted-lst)"
-"(if (= sorted-lst nil) (list elt)"
+"(if (eq sorted-lst nil) (list elt)"
 "(if (f elt (car sorted-lst)) (cons elt sorted-lst)"
 "(cons (car sorted-lst) (insert elt f (cdr sorted-lst))))))))"
-"(if (= lst nil) nil (insert (car lst) f (sort f (cdr lst))))))",
+"(if (eq lst nil) nil (insert (car lst) f (sort f (cdr lst))))))",
 
 "(defun str-cmp-asc (a b) (< (str-cmp a b) 0))",
 "(defun str-cmp-dsc (a b) (> (str-cmp a b) 0))",
+
+"(defun second (x) (car (cdr x)))",
+"(defun third (x) (car (cdr (cdr x))))",
+
+"(defun abs (x) (if (< x 0) (- x) x))",
 };
 
 static const char* macros[] = {
 "(define defun (macro (name args body) `(define ,name (lambda ,args ,body))))",
+
+"(define loopfor (macro (it start cond update body)"
+"`(let ((loop (lambda (,it res break)(if ,cond (loop ,update ,body break) res"
+"))))(call-cc (lambda (brk) (loop ,start nil brk))))))",
+
+"(define loopwhile (macro (cond body)"
+"`(let ((loop (lambda (res break)(if ,cond (loop ,body break) res"
+"))))(call-cc (lambda (brk) (loop nil brk))))))",
+
+"(define looprange (macro (it start end body)"
+"`(let ((loop (lambda (,it res break)(if (< ,it ,end)(loop (+ ,it 1),body break) res"
+"))))(call-cc (lambda (brk) (loop ,start nil brk))))))",
+
+"(define loopforeach (macro (it lst body)"
+"`(let ((loop (lambda (,it rst res break)"
+"(if (eq ,it nil) res (loop (car rst) (cdr rst) ,body break)"
+"))))(call-cc (lambda (brk) (loop (car ,lst) (cdr ,lst) nil brk))))))",
 };
 
 static bool strmatch(const char *str1, const char *str2) {

@@ -24,7 +24,8 @@
 #include "stm32f4xx_conf.h"
 #include "hw.h"
 #include "terminal.h"
-#include "utils.h"
+#include "utils_math.h"
+#include "utils_sys.h"
 #include "ch.h"
 #include "hal.h"
 #include "commands.h"
@@ -34,7 +35,6 @@
 #include "comm_can.h"
 #include "shutdown.h"
 #include "app.h"
-#include "utils.h"
 #include "mempools.h"
 #include "crc.h"
 #include "bms.h"
@@ -52,7 +52,7 @@ volatile uint16_t ADC_Value[HW_ADC_CHANNELS + HW_ADC_CHANNELS_EXTRA];
 volatile float ADC_curr_norm_value[6];
 
 typedef struct {
-	volatile mc_configuration m_conf;
+	mc_configuration m_conf;
 	mc_fault_code m_fault_now;
 	setup_stats m_stats;
 	int m_ignore_iterations;
@@ -130,6 +130,7 @@ static volatile motor_if_state_t *motor_now(void);
 
 // Function pointers
 static void(*pwn_done_func)(void) = 0;
+static void(* volatile send_func_sample)(unsigned char *data, unsigned int len) = 0;
 
 // Threads
 static THD_WORKING_AREA(timer_thread_wa, 512);
@@ -218,9 +219,9 @@ void mc_interface_init(void) {
 
 	case MOTOR_TYPE_FOC:
 #ifdef HW_HAS_DUAL_MOTORS
-		mcpwm_foc_init(&m_motor_1.m_conf, &m_motor_2.m_conf);
+		mcpwm_foc_init((mc_configuration*)&m_motor_1.m_conf, (mc_configuration*)&m_motor_2.m_conf);
 #else
-		mcpwm_foc_init(&m_motor_1.m_conf, &m_motor_1.m_conf);
+		mcpwm_foc_init((mc_configuration*)&m_motor_1.m_conf, (mc_configuration*)&m_motor_1.m_conf);
 #endif
 		break;
 
@@ -341,9 +342,9 @@ void mc_interface_set_configuration(mc_configuration *configuration) {
 
 		case MOTOR_TYPE_FOC:
 #ifdef HW_HAS_DUAL_MOTORS
-			mcpwm_foc_init(&m_motor_1.m_conf, &m_motor_2.m_conf);
+			mcpwm_foc_init((mc_configuration*)&m_motor_1.m_conf, (mc_configuration*)&m_motor_2.m_conf);
 #else
-			mcpwm_foc_init(&m_motor_1.m_conf, &m_motor_1.m_conf);
+			mcpwm_foc_init((mc_configuration*)&m_motor_1.m_conf, (mc_configuration*)&m_motor_1.m_conf);
 #endif
 			break;
 
@@ -374,7 +375,7 @@ void mc_interface_set_configuration(mc_configuration *configuration) {
 			m_motor_1.m_conf.foc_f_zv = motor->m_conf.foc_f_zv;
 		}
 #endif
-		mcpwm_foc_set_configuration(&motor->m_conf);
+		mcpwm_foc_set_configuration((mc_configuration*)&motor->m_conf);
 		break;
 
 	case MOTOR_TYPE_GPD:
@@ -477,6 +478,7 @@ const char* mc_interface_fault_to_string(mc_fault_code fault) {
     case FAULT_CODE_RESOLVER_LOS: return "FAULT_CODE_RESOLVER_LOS";
     case FAULT_CODE_ENCODER_NO_MAGNET: return "FAULT_CODE_ENCODER_NO_MAGNET";
     case FAULT_CODE_ENCODER_MAGNET_TOO_STRONG: return "FAULT_CODE_ENCODER_MAGNET_TOO_STRONG";
+    case FAULT_CODE_PHASE_FILTER: return "FAULT_CODE_PHASE_FILTER";
 	}
 
 	return "Unknown fault";
@@ -498,6 +500,19 @@ mc_state mc_interface_get_state(void) {
 		break;
 	}
 
+	return ret;
+}
+
+mc_control_mode mc_interface_get_control_mode(void) {
+	mc_control_mode ret = CONTROL_MODE_NONE;
+	switch (motor_now()->m_conf.motor_type) {
+	case MOTOR_TYPE_FOC:
+		ret = mcpwm_foc_control_mode();
+		break;
+
+	default:
+		break;
+	}
 	return ret;
 }
 
@@ -1357,7 +1372,9 @@ float mc_interface_get_last_sample_adc_isr_duration(void) {
 	return m_last_adc_duration_sample;
 }
 
-void mc_interface_sample_print_data(debug_sampling_mode mode, uint16_t len, uint8_t decimation, bool raw) {
+void mc_interface_sample_print_data(debug_sampling_mode mode, uint16_t len, uint8_t decimation, bool raw, 
+		void(*reply_func)(unsigned char *data, unsigned int len)) {
+
 	if (len > ADC_SAMPLE_MAX_LEN) {
 		len = ADC_SAMPLE_MAX_LEN;
 	}
@@ -1371,6 +1388,7 @@ void mc_interface_sample_print_data(debug_sampling_mode mode, uint16_t len, uint
 		m_sample_int = decimation;
 		m_sample_mode = mode;
 		m_sample_raw = raw;
+		send_func_sample = reply_func;
 #ifdef HW_HAS_DUAL_MOTORS
 		m_sample_is_second_motor = motor_now() == &m_motor_2;
 #endif
@@ -1561,24 +1579,17 @@ uint64_t mc_interface_get_odometer(void) {
  */
 void mc_interface_ignore_input(int time_ms) {
 	volatile motor_if_state_t *motor = motor_now();
-
-	if (time_ms > motor->m_ignore_iterations) {
-		motor->m_ignore_iterations = time_ms;
-	}
+	motor->m_ignore_iterations = time_ms;
 }
 
 /**
  * Ignore motor control commands for this amount of time on both motors.
  */
 void mc_interface_ignore_input_both(int time_ms) {
-	if (time_ms > m_motor_1.m_ignore_iterations) {
-		m_motor_1.m_ignore_iterations = time_ms;
-	}
+	m_motor_1.m_ignore_iterations = time_ms;
 
 #ifdef HW_HAS_DUAL_MOTORS
-	if (time_ms > m_motor_2.m_ignore_iterations) {
-		m_motor_2.m_ignore_iterations = time_ms;
-	}
+	m_motor_2.m_ignore_iterations = time_ms;
 #endif
 }
 
@@ -1699,13 +1710,13 @@ void mc_interface_mc_timer_isr(bool is_second_motor) {
 	ledpwm_update_pwm();
 
 #ifdef HW_HAS_DUAL_MOTORS
-	volatile motor_if_state_t *motor = is_second_motor ? &m_motor_2 : &m_motor_1;
+	motor_if_state_t *motor = is_second_motor ? (motor_if_state_t*)&m_motor_2 : (motor_if_state_t*)&m_motor_1;
 #else
-	volatile motor_if_state_t *motor = &m_motor_1;
+	motor_if_state_t *motor = (motor_if_state_t*)&m_motor_1;
 	(void)is_second_motor;
 #endif
 
-	volatile mc_configuration *conf_now = &motor->m_conf;
+	mc_configuration *conf_now = (mc_configuration*)&motor->m_conf;
 	const float input_voltage = GET_INPUT_VOLTAGE();
 	UTILS_LP_FAST(motor->m_input_voltage_filtered, input_voltage, 0.02);
 
@@ -1829,7 +1840,7 @@ void mc_interface_mc_timer_isr(bool is_second_motor) {
 	}
 #endif
 
-	float f_samp = motor->m_f_samp_now;
+	float t_samp = 1.0 / motor->m_f_samp_now;
 
 	// Watt and ah counters
 	if (fabsf(current_filtered) > 1.0) {
@@ -1837,8 +1848,8 @@ void mc_interface_mc_timer_isr(bool is_second_motor) {
 		static float curr_diff_sum = 0.0;
 		static float curr_diff_samples = 0;
 
-		curr_diff_sum += current_in_filtered / f_samp;
-		curr_diff_samples += 1.0 / f_samp;
+		curr_diff_sum += current_in_filtered * t_samp;
+		curr_diff_samples += t_samp;
 
 		if (curr_diff_samples >= 0.01) {
 			if (curr_diff_sum > 0.0) {
@@ -2004,7 +2015,7 @@ void mc_interface_mc_timer_isr(bool is_second_motor) {
 
 			m_vzero_samples[m_sample_now] = zero;
 			m_curr_fir_samples[m_sample_now] = (int16_t)(current * (8.0 / FAC_CURRENT));
-			m_f_sw_samples[m_sample_now] = (int16_t)(f_samp / 10.0);
+			m_f_sw_samples[m_sample_now] = (int16_t)(0.1 / t_samp);
 			m_status_samples[m_sample_now] = mcpwm_get_comm_step() | (mcpwm_read_hall_phase() << 3);
 
 			m_sample_now++;
@@ -2665,7 +2676,7 @@ static THD_FUNCTION(sample_send_thread, arg) {
 			buffer[index++] = m_status_samples[ind_samp];
 			buffer[index++] = m_phase_samples[ind_samp];
 
-			commands_send_packet(buffer, index);
+			send_func_sample(buffer, index);
 		}
 	}
 }

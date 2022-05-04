@@ -24,7 +24,8 @@
 #include "stm32f4xx_conf.h"
 #include "mc_interface.h"
 #include "timeout.h"
-#include "utils.h"
+#include "utils_math.h"
+#include "utils_sys.h"
 #include "comm_can.h"
 #include "hw.h"
 #include <math.h>
@@ -57,6 +58,13 @@ void app_adc_configure(adc_config *conf) {
 }
 
 void app_adc_start(bool use_rx_tx) {
+#ifdef HW_ADC_EXT_GPIO
+	palSetPadMode(HW_ADC_EXT_GPIO, HW_ADC_EXT_PIN, PAL_MODE_INPUT_ANALOG);
+#endif
+#ifdef HW_ADC_EXT2_GPIO
+	palSetPadMode(HW_ADC_EXT2_GPIO, HW_ADC_EXT2_PIN, PAL_MODE_INPUT_ANALOG);
+#endif
+
 	use_rx_tx_as_buttons = use_rx_tx;
 	stop_now = false;
 	chThdCreateStatic(adc_thread_wa, sizeof(adc_thread_wa), NORMALPRIO, adc_thread, NULL);
@@ -372,8 +380,10 @@ static THD_FUNCTION(adc_thread, arg) {
 			continue;
 		}
 
+		bool range_ok = read_voltage >= config.voltage_min && read_voltage <= config.voltage_max;
+
 		// If safe start is enabled and the output has not been zero for long enough
-		if (ms_without_power < MIN_MS_WITHOUT_POWER && config.safe_start) {
+		if ((ms_without_power < MIN_MS_WITHOUT_POWER && config.safe_start) || !range_ok) {
 			static int pulses_without_power_before = 0;
 			if (ms_without_power == pulses_without_power_before) {
 				ms_without_power = 0;

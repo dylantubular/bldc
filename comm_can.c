@@ -34,26 +34,36 @@
 #include "hw.h"
 #include "canard_driver.h"
 #include "encoder/encoder.h"
-#include "utils.h"
+#include "utils_sys.h"
 #include "mempools.h"
 #include "shutdown.h"
 #include "bms.h"
 #include "encoder_cfg.h"
+#include "servo_dec.h"
 #ifdef USE_LISPBM
 #include "lispif.h"
 #endif
 
 // Settings
-#define RX_FRAMES_SIZE	100
+#define RX_FRAMES_SIZE	50
 #define RX_BUFFER_SIZE	PACKET_MAX_PL_LEN
 
 #if CAN_ENABLE
+
+typedef struct {
+	CANRxFrame rx_frames[RX_FRAMES_SIZE];
+	int frame_read;
+	int frame_write;
+} rx_state;
+
 // Threads
 static THD_WORKING_AREA(cancom_read_thread_wa, 256);
 static THD_WORKING_AREA(cancom_process_thread_wa, 2048);
 static THD_WORKING_AREA(cancom_status_thread_wa, 512);
+static THD_WORKING_AREA(cancom_status_thread_2_wa, 512);
 static THD_FUNCTION(cancom_read_thread, arg);
 static THD_FUNCTION(cancom_status_thread, arg);
+static THD_FUNCTION(cancom_status_thread_2, arg);
 static THD_FUNCTION(cancom_process_thread, arg);
 
 #ifdef HW_HAS_DUAL_MOTORS
@@ -63,11 +73,13 @@ static THD_WORKING_AREA(cancom_status_internal_thread_wa, 512);
 
 static mutex_t can_mtx;
 static mutex_t can_rx_mtx;
-static uint8_t rx_buffer[RX_BUFFER_SIZE];
-static unsigned int rx_buffer_last_id;
-static CANRxFrame rx_frames[RX_FRAMES_SIZE];
-static int rx_frame_read;
-static int rx_frame_write;
+uint8_t rx_buffer[RX_BUFFER_SIZE];
+unsigned int rx_buffer_last_id;
+static rx_state m_rx_state;
+#ifdef HW_CAN2_DEV
+static rx_state m_rx_state2;
+#endif
+
 static thread_t *process_tp = 0;
 static thread_t *ping_tp = 0;
 static volatile HW_TYPE ping_hw_last = HW_TYPE_VESC;
@@ -81,6 +93,7 @@ static can_status_msg_2 stat_msgs_2[CAN_STATUS_MSGS_TO_STORE];
 static can_status_msg_3 stat_msgs_3[CAN_STATUS_MSGS_TO_STORE];
 static can_status_msg_4 stat_msgs_4[CAN_STATUS_MSGS_TO_STORE];
 static can_status_msg_5 stat_msgs_5[CAN_STATUS_MSGS_TO_STORE];
+static can_status_msg_6 stat_msgs_6[CAN_STATUS_MSGS_TO_STORE];
 static io_board_adc_values io_board_adc_1_4[CAN_STATUS_MSGS_TO_STORE];
 static io_board_adc_values io_board_adc_5_8[CAN_STATUS_MSGS_TO_STORE];
 static io_board_digial_inputs io_board_digital_in[CAN_STATUS_MSGS_TO_STORE];
@@ -117,6 +130,7 @@ void comm_can_init(void) {
 		stat_msgs_3[i].id = -1;
 		stat_msgs_4[i].id = -1;
 		stat_msgs_5[i].id = -1;
+		stat_msgs_6[i].id = -1;
 
 		io_board_adc_1_4[i].id = -1;
 		io_board_adc_5_8[i].id = -1;
@@ -126,8 +140,7 @@ void comm_can_init(void) {
 	}
 
 #if CAN_ENABLE
-	rx_frame_read = 0;
-	rx_frame_write = 0;
+	memset(&m_rx_state, 0, sizeof(m_rx_state));
 
 	chMtxObjectInit(&can_mtx);
 	chMtxObjectInit(&can_rx_mtx);
@@ -142,6 +155,8 @@ void comm_can_init(void) {
 			PAL_STM32_OSPEED_MID1);
 
 #ifdef HW_CAN2_DEV
+	memset(&m_rx_state2, 0, sizeof(m_rx_state2));
+
 	palSetPadMode(HW_CAN2_RX_PORT, HW_CAN2_RX_PIN,
 			PAL_MODE_ALTERNATE(HW_CAN2_GPIO_AF) |
 			PAL_STM32_OTYPE_PUSHPULL |
@@ -169,6 +184,8 @@ void comm_can_init(void) {
 			cancom_read_thread, NULL);
 	chThdCreateStatic(cancom_status_thread_wa, sizeof(cancom_status_thread_wa), NORMALPRIO,
 			cancom_status_thread, NULL);
+	chThdCreateStatic(cancom_status_thread_2_wa, sizeof(cancom_status_thread_2_wa), NORMALPRIO,
+			cancom_status_thread_2, NULL);
 	chThdCreateStatic(cancom_process_thread_wa, sizeof(cancom_process_thread_wa), NORMALPRIO,
 			cancom_process_thread, NULL);
 #ifdef HW_HAS_DUAL_MOTORS
@@ -211,8 +228,14 @@ void comm_can_set_baud(CAN_BAUD baud) {
  * @param replace
  * Process packets for motor2 directly instead of sending them. Unused
  * on single motor hardware.
+ *
+ * @param interface
+ * CAN-interface
+ * 0: Both
+ * 1: CAN1
+ * 2: CAN2
  */
-void comm_can_transmit_eid_replace(uint32_t id, const uint8_t *data, uint8_t len, bool replace) {
+void comm_can_transmit_eid_replace(uint32_t id, const uint8_t *data, uint8_t len, bool replace, int interface) {
 	if (len > 8) {
 		len = 8;
 	}
@@ -245,15 +268,22 @@ void comm_can_transmit_eid_replace(uint32_t id, const uint8_t *data, uint8_t len
 
 	chMtxLock(&can_mtx);
 #ifdef HW_CAN2_DEV
-	for (int i = 0;i < 10;i++) {
-		msg_t ok = canTransmit(&HW_CAN_DEV, CAN_ANY_MAILBOX, &txmsg, TIME_IMMEDIATE);
-		msg_t ok2 = canTransmit(&HW_CAN2_DEV, CAN_ANY_MAILBOX, &txmsg, TIME_IMMEDIATE);
-		if (ok == MSG_OK || ok2 == MSG_OK) {
-			break;
+	if (interface == 0) {
+		for (int i = 0;i < 10;i++) {
+			msg_t ok = canTransmit(&HW_CAN_DEV, CAN_ANY_MAILBOX, &txmsg, TIME_IMMEDIATE);
+			msg_t ok2 = canTransmit(&HW_CAN2_DEV, CAN_ANY_MAILBOX, &txmsg, TIME_IMMEDIATE);
+			if (ok == MSG_OK || ok2 == MSG_OK) {
+				break;
+			}
+			chThdSleepMicroseconds(500);
 		}
-		chThdSleepMicroseconds(500);
+	} else if (interface == 1) {
+		canTransmit(&HW_CAN_DEV, CAN_ANY_MAILBOX, &txmsg, MS2ST(5));
+	} else if (interface == 2) {
+		canTransmit(&HW_CAN2_DEV, CAN_ANY_MAILBOX, &txmsg, MS2ST(5));
 	}
 #else
+	(void)interface;
 	canTransmit(&HW_CAN_DEV, CAN_ANY_MAILBOX, &txmsg, MS2ST(5));
 #endif
 	chMtxUnlock(&can_mtx);
@@ -262,11 +292,16 @@ void comm_can_transmit_eid_replace(uint32_t id, const uint8_t *data, uint8_t len
 	(void)data;
 	(void)len;
 	(void)replace;
+	(void)interface;
 #endif
 }
 
 void comm_can_transmit_eid(uint32_t id, const uint8_t *data, uint8_t len) {
-	comm_can_transmit_eid_replace(id, data, len, false);
+	comm_can_transmit_eid_replace(id, data, len, false, 0);
+}
+
+void comm_can_transmit_eid_if(uint32_t id, const uint8_t *data, uint8_t len, int interface) {
+	comm_can_transmit_eid_replace(id, data, len, false, interface);
 }
 
 void comm_can_transmit_sid(uint32_t id, uint8_t *data, uint8_t len) {
@@ -363,7 +398,7 @@ void comm_can_send_buffer(uint8_t controller_id, uint8_t *data, unsigned int len
 		memcpy(send_buffer + ind, data, len);
 		ind += len;
 		comm_can_transmit_eid_replace(controller_id |
-				((uint32_t)CAN_PACKET_PROCESS_SHORT_BUFFER << 8), send_buffer, ind, true);
+				((uint32_t)CAN_PACKET_PROCESS_SHORT_BUFFER << 8), send_buffer, ind, true, 0);
 	} else {
 		unsigned int end_a = 0;
 		for (unsigned int i = 0;i < len;i += 7) {
@@ -384,7 +419,7 @@ void comm_can_send_buffer(uint8_t controller_id, uint8_t *data, unsigned int len
 			}
 
 			comm_can_transmit_eid_replace(controller_id |
-					((uint32_t)CAN_PACKET_FILL_RX_BUFFER << 8), send_buffer, send_len + 1, true);
+					((uint32_t)CAN_PACKET_FILL_RX_BUFFER << 8), send_buffer, send_len + 1, true, 0);
 		}
 
 		for (unsigned int i = end_a;i < len;i += 6) {
@@ -400,7 +435,7 @@ void comm_can_send_buffer(uint8_t controller_id, uint8_t *data, unsigned int len
 			}
 
 			comm_can_transmit_eid_replace(controller_id |
-					((uint32_t)CAN_PACKET_FILL_RX_BUFFER_LONG << 8), send_buffer, send_len + 2, true);
+					((uint32_t)CAN_PACKET_FILL_RX_BUFFER_LONG << 8), send_buffer, send_len + 2, true, 0);
 		}
 
 		uint32_t ind = 0;
@@ -413,7 +448,7 @@ void comm_can_send_buffer(uint8_t controller_id, uint8_t *data, unsigned int len
 		send_buffer[ind++] = (uint8_t)(crc & 0xFF);
 
 		comm_can_transmit_eid_replace(controller_id |
-				((uint32_t)CAN_PACKET_PROCESS_RX_BUFFER << 8), send_buffer, ind++, true);
+				((uint32_t)CAN_PACKET_PROCESS_RX_BUFFER << 8), send_buffer, ind++, true, 0);
 	}
 }
 
@@ -422,7 +457,7 @@ void comm_can_set_duty(uint8_t controller_id, float duty) {
 	uint8_t buffer[4];
 	buffer_append_int32(buffer, (int32_t)(duty * 100000.0), &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_SET_DUTY << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_SET_DUTY << 8), buffer, send_index, true, 0);
 }
 
 void comm_can_set_current(uint8_t controller_id, float current) {
@@ -430,7 +465,7 @@ void comm_can_set_current(uint8_t controller_id, float current) {
 	uint8_t buffer[4];
 	buffer_append_int32(buffer, (int32_t)(current * 1000.0), &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_SET_CURRENT << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_SET_CURRENT << 8), buffer, send_index, true, 0);
 }
 
 void comm_can_set_current_off_delay(uint8_t controller_id, float current, float off_delay) {
@@ -439,7 +474,7 @@ void comm_can_set_current_off_delay(uint8_t controller_id, float current, float 
 	buffer_append_int32(buffer, (int32_t)(current * 1000.0), &send_index);
 	buffer_append_float16(buffer, off_delay, 1e3, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_SET_CURRENT << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_SET_CURRENT << 8), buffer, send_index, true, 0);
 }
 
 void comm_can_set_current_brake(uint8_t controller_id, float current) {
@@ -447,7 +482,7 @@ void comm_can_set_current_brake(uint8_t controller_id, float current) {
 	uint8_t buffer[4];
 	buffer_append_int32(buffer, (int32_t)(current * 1000.0), &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_SET_CURRENT_BRAKE << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_SET_CURRENT_BRAKE << 8), buffer, send_index, true, 0);
 }
 
 void comm_can_set_rpm(uint8_t controller_id, float rpm) {
@@ -455,7 +490,7 @@ void comm_can_set_rpm(uint8_t controller_id, float rpm) {
 	uint8_t buffer[4];
 	buffer_append_int32(buffer, (int32_t)rpm, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_SET_RPM << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_SET_RPM << 8), buffer, send_index, true, 0);
 }
 
 void comm_can_set_pos(uint8_t controller_id, float pos) {
@@ -463,7 +498,7 @@ void comm_can_set_pos(uint8_t controller_id, float pos) {
 	uint8_t buffer[4];
 	buffer_append_int32(buffer, (int32_t)(pos * 1000000.0), &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_SET_POS << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_SET_POS << 8), buffer, send_index, true, 0);
 }
 
 /**
@@ -480,7 +515,7 @@ void comm_can_set_current_rel(uint8_t controller_id, float current_rel) {
 	uint8_t buffer[4];
 	buffer_append_float32(buffer, current_rel, 1e5, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_SET_CURRENT_REL << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_SET_CURRENT_REL << 8), buffer, send_index, true, 0);
 }
 
 /**
@@ -492,7 +527,7 @@ void comm_can_set_current_rel_off_delay(uint8_t controller_id, float current_rel
 	buffer_append_float32(buffer, current_rel, 1e5, &send_index);
 	buffer_append_float16(buffer, off_delay, 1e3, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_SET_CURRENT_REL << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_SET_CURRENT_REL << 8), buffer, send_index, true, 0);
 }
 
 /**
@@ -509,7 +544,7 @@ void comm_can_set_current_brake_rel(uint8_t controller_id, float current_rel) {
 	uint8_t buffer[4];
 	buffer_append_float32(buffer, current_rel, 1e5, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_SET_CURRENT_BRAKE_REL << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_SET_CURRENT_BRAKE_REL << 8), buffer, send_index, true, 0);
 }
 
 /**
@@ -526,7 +561,7 @@ void comm_can_set_handbrake(uint8_t controller_id, float current) {
 	uint8_t buffer[4];
 	buffer_append_float32(buffer, current, 1e3, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_SET_CURRENT_HANDBRAKE << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_SET_CURRENT_HANDBRAKE << 8), buffer, send_index, true, 0);
 }
 
 /**
@@ -543,7 +578,7 @@ void comm_can_set_handbrake_rel(uint8_t controller_id, float current_rel) {
 	uint8_t buffer[4];
 	buffer_append_float32(buffer, current_rel, 1e5, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_SET_CURRENT_HANDBRAKE_REL << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_SET_CURRENT_HANDBRAKE_REL << 8), buffer, send_index, true, 0);
 }
 
 /**
@@ -578,7 +613,7 @@ bool comm_can_ping(uint8_t controller_id, HW_TYPE *hw_type) {
 	uint8_t buffer[1];
 	buffer[0] = app_get_configuration()->controller_id;
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_PING << 8), buffer, 1, true);
+			((uint32_t)CAN_PACKET_PING << 8), buffer, 1, true, 0);
 
 	int ret = chEvtWaitAnyTimeout(1 << 29, MS2ST(10));
 	ping_tp = 0;
@@ -616,7 +651,7 @@ void comm_can_detect_apply_all_foc(uint8_t controller_id, bool activate_status_m
 	buffer[send_index++] = activate_status_msgs;
 	buffer_append_float32(buffer, max_power_loss, 1e3, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)CAN_PACKET_DETECT_APPLY_ALL_FOC << 8), buffer, send_index, true);
+			((uint32_t)CAN_PACKET_DETECT_APPLY_ALL_FOC << 8), buffer, send_index, true, 0);
 }
 
 /**
@@ -642,7 +677,7 @@ void comm_can_conf_current_limits(uint8_t controller_id,
 	buffer_append_float32(buffer, max, 1e3, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
 			((uint32_t)(store ? CAN_PACKET_CONF_STORE_CURRENT_LIMITS :
-					CAN_PACKET_CONF_CURRENT_LIMITS) << 8), buffer, send_index, true);
+					CAN_PACKET_CONF_CURRENT_LIMITS) << 8), buffer, send_index, true, 0);
 }
 
 /**
@@ -668,7 +703,7 @@ void comm_can_conf_current_limits_in(uint8_t controller_id,
 	buffer_append_float32(buffer, max, 1e3, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
 			((uint32_t)(store ? CAN_PACKET_CONF_STORE_CURRENT_LIMITS_IN :
-					CAN_PACKET_CONF_CURRENT_LIMITS_IN) << 8), buffer, send_index, true);
+					CAN_PACKET_CONF_CURRENT_LIMITS_IN) << 8), buffer, send_index, true, 0);
 }
 
 /**
@@ -694,7 +729,7 @@ void comm_can_conf_foc_erpms(uint8_t controller_id,
 	buffer_append_float32(buffer, foc_sl_erpm, 1e3, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
 			((uint32_t)(store ? CAN_PACKET_CONF_STORE_FOC_ERPMS :
-					CAN_PACKET_CONF_FOC_ERPMS) << 8), buffer, send_index, true);
+					CAN_PACKET_CONF_FOC_ERPMS) << 8), buffer, send_index, true, 0);
 }
 
 int comm_can_detect_all_foc_res(unsigned int index) {
@@ -721,14 +756,14 @@ void comm_can_conf_battery_cut(uint8_t controller_id,
 	buffer_append_float32(buffer, end, 1e3, &send_index);
 	comm_can_transmit_eid_replace(controller_id |
 			((uint32_t)(store ? CAN_PACKET_CONF_STORE_BATTERY_CUT :
-					CAN_PACKET_CONF_BATTERY_CUT) << 8), buffer, send_index, true);
+					CAN_PACKET_CONF_BATTERY_CUT) << 8), buffer, send_index, true, 0);
 }
 
 void comm_can_shutdown(uint8_t controller_id) {
 	int32_t send_index = 0;
 	uint8_t buffer[8];
 	comm_can_transmit_eid_replace(controller_id |
-			((uint32_t)(CAN_PACKET_SHUTDOWN) << 8), buffer, send_index, true);
+			((uint32_t)(CAN_PACKET_SHUTDOWN) << 8), buffer, send_index, true, 0);
 }
 
 /**
@@ -911,6 +946,42 @@ can_status_msg_5 *comm_can_get_status_msg_5_id(int id) {
 	return 0;
 }
 
+/**
+ * Get status message 6 by index.
+ *
+ * @param index
+ * Index in the array
+ *
+ * @return
+ * The message or 0 for an invalid index.
+ */
+can_status_msg_6 *comm_can_get_status_msg_6_index(int index) {
+	if (index < CAN_STATUS_MSGS_TO_STORE) {
+		return &stat_msgs_6[index];
+	} else {
+		return 0;
+	}
+}
+
+/**
+ * Get status message 6 by id.
+ *
+ * @param id
+ * Id of the controller that sent the status message.
+ *
+ * @return
+ * The message or 0 for an invalid id.
+ */
+can_status_msg_6 *comm_can_get_status_msg_6_id(int id) {
+	for (int i = 0;i < CAN_STATUS_MSGS_TO_STORE;i++) {
+		if (stat_msgs_6[i].id == id) {
+			return &stat_msgs_6[i];
+		}
+	}
+
+	return 0;
+}
+
 io_board_adc_values *comm_can_get_io_board_adc_1_4_index(int index) {
 	if (index < CAN_STATUS_MSGS_TO_STORE) {
 		return &io_board_adc_1_4[index];
@@ -986,7 +1057,7 @@ void comm_can_io_board_set_output_digital(int id, int channel, bool on) {
 	buffer[send_index++] = on ? 1 : 0;
 
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_IO_BOARD_SET_OUTPUT_DIGITAL << 8),
-			buffer, send_index, true);
+			buffer, send_index, true, 0);
 }
 
 void comm_can_io_board_set_output_pwm(int id, int channel, float duty) {
@@ -997,7 +1068,7 @@ void comm_can_io_board_set_output_pwm(int id, int channel, float duty) {
 	buffer_append_float16(buffer, duty, 1e3, &send_index);
 
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_IO_BOARD_SET_OUTPUT_PWM << 8),
-			buffer, send_index, true);
+			buffer, send_index, true, 0);
 }
 
 psw_status *comm_can_get_psw_status_index(int index) {
@@ -1026,7 +1097,7 @@ void comm_can_psw_switch(int id, bool is_on, bool plot) {
 	buffer[send_index++] = plot ? 1 : 0;
 
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_PSW_SWITCH << 8),
-			buffer, send_index, true);
+			buffer, send_index, true, 0);
 }
 
 void comm_can_update_pid_pos_offset(int id, float angle_now, bool store) {
@@ -1037,28 +1108,46 @@ void comm_can_update_pid_pos_offset(int id, float angle_now, bool store) {
 	buffer[send_index++] = store;
 
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_UPDATE_PID_POS_OFFSET << 8),
-			buffer, send_index, true);
+			buffer, send_index, true, 0);
 }
 
-CANRxFrame *comm_can_get_rx_frame(void) {
+/*
+ * Get frame from RX buffer. Interface is the CAN-interface to read from. If
+ * no frames are available NULL is returned.
+ *
+ * Interface: 0: Any interface, 1: CAN1, 2: CAN2
+ */
+CANRxFrame *comm_can_get_rx_frame(int interface) {
+	CANRxFrame *res = NULL;
+
 #if CAN_ENABLE
 	chMtxLock(&can_rx_mtx);
-	if (rx_frame_read != rx_frame_write) {
-		CANRxFrame *res = &rx_frames[rx_frame_read++];
+	if (!res && interface != 2) {
+		if (m_rx_state.frame_read != m_rx_state.frame_write) {
+			res = &m_rx_state.rx_frames[m_rx_state.frame_read++];
 
-		if (rx_frame_read == RX_FRAMES_SIZE) {
-			rx_frame_read = 0;
+			if (m_rx_state.frame_read == RX_FRAMES_SIZE) {
+				m_rx_state.frame_read = 0;
+			}
 		}
-
-		chMtxUnlock(&can_rx_mtx);
-		return res;
-	} else {
-		chMtxUnlock(&can_rx_mtx);
-		return 0;
 	}
-#else
-	return 0;
+#ifdef HW_CAN2_DEV
+	if (!res && interface != 1) {
+		if (m_rx_state2.frame_read != m_rx_state2.frame_write) {
+			res = &m_rx_state2.rx_frames[m_rx_state2.frame_read++];
+
+			if (m_rx_state2.frame_read == RX_FRAMES_SIZE) {
+				m_rx_state2.frame_read = 0;
+			}
+		}
+	}
 #endif
+	chMtxUnlock(&can_rx_mtx);
+#else
+	(void)interface;
+#endif
+
+	return res;
 }
 
 void comm_can_send_status1(uint8_t id, bool replace) {
@@ -1068,7 +1157,7 @@ void comm_can_send_status1(uint8_t id, bool replace) {
 	buffer_append_int16(buffer, (int16_t)(mc_interface_get_tot_current_filtered() * 1e1), &send_index);
 	buffer_append_int16(buffer, (int16_t)(mc_interface_get_duty_cycle_now() * 1e3), &send_index);
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS << 8),
-			buffer, send_index, replace);
+			buffer, send_index, replace, 0);
 }
 
 void comm_can_send_status2(uint8_t id, bool replace) {
@@ -1077,7 +1166,7 @@ void comm_can_send_status2(uint8_t id, bool replace) {
 	buffer_append_int32(buffer, (int32_t)(mc_interface_get_amp_hours(false) * 1e4), &send_index);
 	buffer_append_int32(buffer, (int32_t)(mc_interface_get_amp_hours_charged(false) * 1e4), &send_index);
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_2 << 8),
-			buffer, send_index, replace);
+			buffer, send_index, replace, 0);
 }
 
 void comm_can_send_status3(uint8_t id, bool replace) {
@@ -1086,7 +1175,7 @@ void comm_can_send_status3(uint8_t id, bool replace) {
 	buffer_append_int32(buffer, (int32_t)(mc_interface_get_watt_hours(false) * 1e4), &send_index);
 	buffer_append_int32(buffer, (int32_t)(mc_interface_get_watt_hours_charged(false) * 1e4), &send_index);
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_3 << 8),
-			buffer, send_index, replace);
+			buffer, send_index, replace, 0);
 }
 
 void comm_can_send_status4(uint8_t id, bool replace) {
@@ -1097,7 +1186,7 @@ void comm_can_send_status4(uint8_t id, bool replace) {
 	buffer_append_int16(buffer, (int16_t)(mc_interface_get_tot_current_in_filtered() * 1e1), &send_index);
 	buffer_append_int16(buffer, (int16_t)(mc_interface_get_pid_pos_now() * 50.0), &send_index);
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_4 << 8),
-			buffer, send_index, replace);
+			buffer, send_index, replace, 0);
 }
 
 void comm_can_send_status5(uint8_t id, bool replace) {
@@ -1107,7 +1196,18 @@ void comm_can_send_status5(uint8_t id, bool replace) {
 	buffer_append_int16(buffer, (int16_t)(mc_interface_get_input_voltage_filtered() * 1e1), &send_index);
 	buffer_append_int16(buffer, 0, &send_index); // Reserved for now
 	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_5 << 8),
-			buffer, send_index, replace);
+			buffer, send_index, replace, 0);
+}
+
+void comm_can_send_status6(uint8_t id, bool replace) {
+	int32_t send_index = 0;
+	uint8_t buffer[8];
+	buffer_append_float16(buffer, ADC_VOLTS(ADC_IND_EXT), 1e3, &send_index);
+	buffer_append_float16(buffer, ADC_VOLTS(ADC_IND_EXT2), 1e3, &send_index);
+	buffer_append_float16(buffer, ADC_VOLTS(ADC_IND_EXT3), 1e3, &send_index);
+	buffer_append_float16(buffer, servodec_get_servo(0), 1e3, &send_index);
+	comm_can_transmit_eid_replace(id | ((uint32_t)CAN_PACKET_STATUS_6 << 8),
+			buffer, send_index, replace, 0);
 }
 
 #if CAN_ENABLE
@@ -1136,9 +1236,9 @@ static THD_FUNCTION(cancom_read_thread, arg) {
 
 		while (result == MSG_OK) {
 			chMtxLock(&can_rx_mtx);
-			rx_frames[rx_frame_write++] = rxmsg;
-			if (rx_frame_write == RX_FRAMES_SIZE) {
-				rx_frame_write = 0;
+			m_rx_state.rx_frames[m_rx_state.frame_write++] = rxmsg;
+			if (m_rx_state.frame_write == RX_FRAMES_SIZE) {
+				m_rx_state.frame_write = 0;
 			}
 			chMtxUnlock(&can_rx_mtx);
 
@@ -1152,9 +1252,9 @@ static THD_FUNCTION(cancom_read_thread, arg) {
 
 		while (result == MSG_OK) {
 			chMtxLock(&can_rx_mtx);
-			rx_frames[rx_frame_write++] = rxmsg;
-			if (rx_frame_write == RX_FRAMES_SIZE) {
-				rx_frame_write = 0;
+			m_rx_state2.rx_frames[m_rx_state2.frame_write++] = rxmsg;
+			if (m_rx_state2.frame_write == RX_FRAMES_SIZE) {
+				m_rx_state2.frame_write = 0;
 			}
 			chMtxUnlock(&can_rx_mtx);
 
@@ -1184,7 +1284,7 @@ static THD_FUNCTION(cancom_process_thread, arg) {
 			continue;
 		} else if (app_get_configuration()->can_mode == CAN_MODE_COMM_BRIDGE) {
 			CANRxFrame *rxmsg_tmp;
-			while ((rxmsg_tmp = comm_can_get_rx_frame()) != 0) {
+			while ((rxmsg_tmp = comm_can_get_rx_frame(0)) != 0) {
 				CANRxFrame rxmsg = *rxmsg_tmp;
 				commands_fwd_can_frame(rxmsg.DLC, rxmsg.data8,
 						rxmsg.IDE == CAN_IDE_EXT ? rxmsg.EID : rxmsg.SID,
@@ -1204,7 +1304,7 @@ static THD_FUNCTION(cancom_process_thread, arg) {
 		}
 
 		CANRxFrame *rxmsg_tmp;
-		while ((rxmsg_tmp = comm_can_get_rx_frame()) != 0) {
+		while ((rxmsg_tmp = comm_can_get_rx_frame(0)) != 0) {
 			CANRxFrame rxmsg = *rxmsg_tmp;
 
 			if (rxmsg.IDE == CAN_IDE_EXT) {
@@ -1258,81 +1358,110 @@ static THD_FUNCTION(cancom_status_internal_thread, arg) {
 		comm_can_send_status3(utils_second_motor_id(), true);
 		comm_can_send_status4(utils_second_motor_id(), true);
 		comm_can_send_status5(utils_second_motor_id(), true);
+		comm_can_send_status6(utils_second_motor_id(), true);
 		chThdSleepMilliseconds(2);
 	}
 }
 #endif
 
+static void send_can_status(uint8_t msgs, uint8_t id) {
+	if ((msgs >> 0) & 1) {
+		mc_interface_select_motor_thread(1);
+		comm_can_send_status1(id, false);
+#ifdef HW_HAS_DUAL_MOTORS
+		mc_interface_select_motor_thread(2);
+		comm_can_send_status1(utils_second_motor_id(), false);
+#endif
+	}
+
+	if ((msgs >> 1) & 1) {
+		mc_interface_select_motor_thread(1);
+		comm_can_send_status2(id, false);
+#ifdef HW_HAS_DUAL_MOTORS
+		mc_interface_select_motor_thread(2);
+		comm_can_send_status2(utils_second_motor_id(), false);
+#endif
+	}
+
+	if ((msgs >> 2) & 1) {
+		mc_interface_select_motor_thread(1);
+		comm_can_send_status3(id, false);
+#ifdef HW_HAS_DUAL_MOTORS
+		mc_interface_select_motor_thread(2);
+		comm_can_send_status3(utils_second_motor_id(), false);
+#endif
+	}
+
+	if ((msgs >> 3) & 1) {
+		mc_interface_select_motor_thread(1);
+		comm_can_send_status4(id, false);
+#ifdef HW_HAS_DUAL_MOTORS
+		mc_interface_select_motor_thread(2);
+		comm_can_send_status4(utils_second_motor_id(), false);
+#endif
+	}
+
+	if ((msgs >> 4) & 1) {
+		mc_interface_select_motor_thread(1);
+		comm_can_send_status5(id, false);
+#ifdef HW_HAS_DUAL_MOTORS
+		mc_interface_select_motor_thread(2);
+		comm_can_send_status5(utils_second_motor_id(), false);
+#endif
+	}
+
+	if ((msgs >> 5) & 1) {
+		mc_interface_select_motor_thread(1);
+		comm_can_send_status6(id, false);
+#ifdef HW_HAS_DUAL_MOTORS
+		mc_interface_select_motor_thread(2);
+		comm_can_send_status6(utils_second_motor_id(), false);
+#endif
+	}
+}
+
 static THD_FUNCTION(cancom_status_thread, arg) {
 	(void)arg;
-	chRegSetThreadName("CAN status");
+	chRegSetThreadName("CAN status 1");
 
 	for(;;) {
 		const app_configuration *conf = app_get_configuration();
 
 		if (conf->can_mode == CAN_MODE_VESC) {
-			if (conf->send_can_status == CAN_STATUS_1 ||
-					conf->send_can_status == CAN_STATUS_1_2 ||
-					conf->send_can_status == CAN_STATUS_1_2_3 ||
-					conf->send_can_status == CAN_STATUS_1_2_3_4 ||
-					conf->send_can_status == CAN_STATUS_1_2_3_4_5) {
-				mc_interface_select_motor_thread(1);
-				comm_can_send_status1(conf->controller_id, false);
-#ifdef HW_HAS_DUAL_MOTORS
-				mc_interface_select_motor_thread(2);
-				comm_can_send_status1(utils_second_motor_id(), false);
-#endif
-			}
-
-			if (conf->send_can_status == CAN_STATUS_1_2 ||
-					conf->send_can_status == CAN_STATUS_1_2_3||
-					conf->send_can_status == CAN_STATUS_1_2_3_4 ||
-					conf->send_can_status == CAN_STATUS_1_2_3_4_5) {
-				mc_interface_select_motor_thread(1);
-				comm_can_send_status2(conf->controller_id, false);
-#ifdef HW_HAS_DUAL_MOTORS
-				mc_interface_select_motor_thread(2);
-				comm_can_send_status2(utils_second_motor_id(), false);
-#endif
-			}
-
-			if (conf->send_can_status == CAN_STATUS_1_2_3 ||
-					conf->send_can_status == CAN_STATUS_1_2_3_4 ||
-					conf->send_can_status == CAN_STATUS_1_2_3_4_5) {
-				mc_interface_select_motor_thread(1);
-				comm_can_send_status3(conf->controller_id, false);
-#ifdef HW_HAS_DUAL_MOTORS
-				mc_interface_select_motor_thread(2);
-				comm_can_send_status3(utils_second_motor_id(), false);
-#endif
-			}
-
-			if (conf->send_can_status == CAN_STATUS_1_2_3_4 ||
-					conf->send_can_status == CAN_STATUS_1_2_3_4_5) {
-				mc_interface_select_motor_thread(1);
-				comm_can_send_status4(conf->controller_id, false);
-#ifdef HW_HAS_DUAL_MOTORS
-				mc_interface_select_motor_thread(2);
-				comm_can_send_status4(utils_second_motor_id(), false);
-#endif
-			}
-
-			if (conf->send_can_status == CAN_STATUS_1_2_3_4_5) {
-				mc_interface_select_motor_thread(1);
-				comm_can_send_status5(conf->controller_id, false);
-#ifdef HW_HAS_DUAL_MOTORS
-				mc_interface_select_motor_thread(2);
-				comm_can_send_status5(utils_second_motor_id(), false);
-#endif
-			}
+			send_can_status(conf->can_status_msgs_r1, conf->controller_id);
 		}
 
-		while (conf->send_can_status_rate_hz == 0) {
+		while (conf->can_status_rate_1 == 0) {
 			chThdSleepMilliseconds(10);
 			conf = app_get_configuration();
 		}
 
-		systime_t sleep_time = CH_CFG_ST_FREQUENCY / conf->send_can_status_rate_hz;
+		systime_t sleep_time = CH_CFG_ST_FREQUENCY / conf->can_status_rate_1;
+		if (sleep_time == 0) {
+			sleep_time = 1;
+		}
+
+		chThdSleep(sleep_time);
+	}
+}
+
+static THD_FUNCTION(cancom_status_thread_2, arg) {
+	(void)arg;
+	chRegSetThreadName("CAN status 2");
+
+	for(;;) {
+		const app_configuration *conf = app_get_configuration();
+
+		if (conf->can_mode == CAN_MODE_VESC) {
+			send_can_status(conf->can_status_msgs_r2, conf->controller_id);
+		}
+
+		while (conf->can_status_rate_2 == 0) {
+			chThdSleepMilliseconds(10);
+			conf = app_get_configuration();
+		}
+
+		systime_t sleep_time = CH_CFG_ST_FREQUENCY / conf->can_status_rate_2;
 		if (sleep_time == 0) {
 			sleep_time = 1;
 		}
@@ -1529,7 +1658,7 @@ static void decode_msg(uint32_t eid, uint8_t *data8, int len, bool is_replaced) 
 				buffer[0] = is_replaced ? utils_second_motor_id() : id;
 				buffer[1] = HW_TYPE_VESC;
 				comm_can_transmit_eid_replace(data8[0] |
-						((uint32_t)CAN_PACKET_PONG << 8), buffer, 2, true);
+						((uint32_t)CAN_PACKET_PONG << 8), buffer, 2, true, 0);
 			} break;
 
 			case CAN_PACKET_PONG:
@@ -1556,8 +1685,8 @@ static void decode_msg(uint32_t eid, uint8_t *data8, int len, bool is_replaced) 
 					app_configuration *appconf = mempools_alloc_appconf();
 					*appconf = *app_get_configuration();
 
-					if (appconf->send_can_status != CAN_STATUS_1_2_3_4) {
-						appconf->send_can_status = CAN_STATUS_1_2_3_4;
+					if (appconf->can_status_msgs_r1 != 0b00001111) {
+						appconf->can_status_msgs_r1 = 0b00001111;
 						conf_general_store_app_configuration(appconf);
 						app_set_configuration(appconf);
 					}
@@ -1568,7 +1697,7 @@ static void decode_msg(uint32_t eid, uint8_t *data8, int len, bool is_replaced) 
 				int8_t buffer[1];
 				buffer[0] = res;
 				comm_can_transmit_eid_replace(data8[0] |
-						((uint32_t)CAN_PACKET_DETECT_APPLY_ALL_FOC_RES << 8), (uint8_t*)buffer, 1, true);
+						((uint32_t)CAN_PACKET_DETECT_APPLY_ALL_FOC_RES << 8), (uint8_t*)buffer, 1, true, 0);
 			} break;
 
 			case CAN_PACKET_DETECT_APPLY_ALL_FOC_RES: {
@@ -1656,7 +1785,7 @@ static void decode_msg(uint32_t eid, uint8_t *data8, int len, bool is_replaced) 
 			case CAN_PACKET_POLL_TS5700N8501_STATUS: {
 				comm_can_transmit_eid_replace(app_get_configuration()->controller_id |
 						((uint32_t)CAN_PACKET_POLL_TS5700N8501_STATUS << 8),
-						enc_ts5700n8501_get_raw_status(&encoder_cfg_TS5700N8501), 8, true);
+						enc_ts5700n8501_get_raw_status(&encoder_cfg_TS5700N8501), 8, true, 0);
 			} break;
 
 			case CAN_PACKET_CONF_BATTERY_CUT:
@@ -1709,7 +1838,7 @@ static void decode_msg(uint32_t eid, uint8_t *data8, int len, bool is_replaced) 
 				int32_t index = 0;
 				buffer_append_int32(buffer, (int32_t)(encoder_read_deg() * 100000.0), &index);
 				comm_can_transmit_eid_replace(app_get_configuration()->controller_id |
-						((uint32_t)CAN_PACKET_POLL_ROTOR_POS << 8), (uint8_t*)buffer, 4, true);
+						((uint32_t)CAN_PACKET_POLL_ROTOR_POS << 8), (uint8_t*)buffer, 4, true, 0);
 			} break;
 
 			default:
@@ -1788,6 +1917,22 @@ static void decode_msg(uint32_t eid, uint8_t *data8, int len, bool is_replaced) 
 				stat_tmp_5->rx_time = chVTGetSystemTime();
 				stat_tmp_5->tacho_value = buffer_get_int32(data8, &ind);
 				stat_tmp_5->v_in = (float)buffer_get_int16(data8, &ind) / 1e1;
+				break;
+			}
+		}
+		break;
+
+	case CAN_PACKET_STATUS_6:
+		for (int i = 0;i < CAN_STATUS_MSGS_TO_STORE;i++) {
+			can_status_msg_6 *stat_tmp_6 = &stat_msgs_6[i];
+			if (stat_tmp_6->id == id || stat_tmp_6->id == -1) {
+				ind = 0;
+				stat_tmp_6->id = id;
+				stat_tmp_6->rx_time = chVTGetSystemTime();
+				stat_tmp_6->adc_1 = buffer_get_float16(data8, 1e3, &ind);
+				stat_tmp_6->adc_2 = buffer_get_float16(data8, 1e3, &ind);
+				stat_tmp_6->adc_3 = buffer_get_float16(data8, 1e3, &ind);
+				stat_tmp_6->ppm = buffer_get_float16(data8, 1e3, &ind);
 				break;
 			}
 		}

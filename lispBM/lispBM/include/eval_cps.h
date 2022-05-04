@@ -36,12 +36,13 @@ typedef struct eval_context_s{
   lbm_value curr_env;
   lbm_value mailbox;  /*massage passing mailbox */
   lbm_value r;
+  char *error_reason;
   bool  done;
   bool  app_cont;
   lbm_stack_t K;
   /* Process control */
-  uint32_t timestamp;
-  uint32_t sleep_us;
+  lbm_uint timestamp;
+  lbm_uint sleep_us;
   lbm_cid id;
   /* List structure */
   struct eval_context_s *prev;
@@ -77,15 +78,15 @@ extern int lbm_eval_init(void);
  * \return 1 if a context was successfully removed otherwise 0.
  */
 extern int lbm_remove_done_ctx(lbm_cid cid, lbm_value *v);
-/** Wait until a given cid is not present in any of the queues. 
- *  If you have spawned this cid, you can conclude that it has 
- *  run to completion or failure. 
+/** Wait until a given cid is not present in any of the queues.
+ *  If you have spawned this cid, you can conclude that it has
+ *  run to completion or failure.
  *
  * \param cid Context id to wait for.
  * \param timeout_ms timeout in ms or 0 for no timeout.
  * \return Result computed by the program running in the context.
  */
-extern bool lbm_wait_ctx(lbm_cid cid, uint32_t timeout_ms);
+extern bool lbm_wait_ctx(lbm_cid cid, lbm_uint timeout_ms);
 
 
 /** Creates a context and initializes it with the provided program. The context
@@ -141,6 +142,18 @@ extern void lbm_kill_eval(void);
  * \return Current state of the evaluator.
  */
 extern uint32_t lbm_get_eval_state(void);
+/** Provide a description of an error as a string.
+ *  Use when implementing for example extensions to
+ *  report an error message to the programmer in case
+ *  the extension is used incorrectly.
+ *
+ *  The error string can be allocates in lbm_memory
+ *  and will in that case be freed when the context
+ *  that errored is removed.
+ * \param error_str
+ * \return 1 on success and 0 on failure.
+ */
+extern int lbm_set_error_reason(char *error_str);
 /** Create a context and enqueue it as runnable.
  *
  * \param program The program to evaluate in the context.
@@ -148,7 +161,17 @@ extern uint32_t lbm_get_eval_state(void);
  * \param stack_size Stack size for the context.
  * \return
  */
-extern lbm_cid lbm_create_ctx(lbm_value program, lbm_value env, uint32_t stack_size);
+extern lbm_cid lbm_create_ctx(lbm_value program, lbm_value env, lbm_uint stack_size);
+/** Block a context from an extension
+ */
+extern void lbm_block_ctx_from_extension(void);
+/** Unblock a context that has been blocked by a C extension
+ *  Trying to unblock a context that is waiting on a message
+ *  in a mailbox is not encouraged
+ * \param cid Lisp process to wake up.
+ * \param result Value passed to the lisp process as the result from the blocking function.
+ */
+extern bool lbm_unblock_ctx(lbm_cid cid, lbm_value result);
 /**  Iterate over all ready contexts and apply function on each context.
  *
  * \param f Function to apply to each context.
@@ -170,6 +193,14 @@ extern void lbm_blocked_iterator(ctx_fun f, void*, void*);
  * \param arg2 Same as above
  */
 extern void lbm_done_iterator(ctx_fun f, void*, void*);
+/** toggle verbosity level of error messages
+ */
+extern void lbm_toggle_verbose(void);
+/** Set verbosity level of lispbm error messages.
+ *
+ * \param verbose Boolean to turn verbose errors on or off.
+ */
+extern void lbm_set_verbose(bool verbose);
 /** Set a usleep callback for use by the evaluator thread.
  *
  * \param fptr Pointer to a sleep function.
@@ -196,12 +227,27 @@ extern void lbm_set_printf_callback(int (*prnt)(const char*, ...));
  * an undefined symbol
  */
 extern void lbm_set_dynamic_load_callback(bool (*fptr)(const char *, const char **));
+/** Set a callback that is run when reading source is finishes
+ *  within a context
+ */
+extern void lbm_set_reader_done_callback(void (*fptr)(lbm_cid));
+/** Get the CID of the currently executing context.
+ *  Should be called from an extension where there is
+ *  a guarantee that a context is running
+ */
+extern lbm_cid lbm_get_current_cid(void);
+
 /** Create a token stream for parsing for code
  *
  * \param str character stream to convert into a token stream.
  * \return token stream.
  */
 extern lbm_value lbm_create_token_stream(lbm_tokenizer_char_stream_t *str);
+/** Explicitly free a stream (if something breaks while creating it)
+ *  The stream must not have been made available to the program
+ * \param stream The stream to free
+ */
+extern int lbm_explicit_free_token_stream(lbm_value stream);
 
 /** deliver a message
  *

@@ -313,6 +313,12 @@
 #ifndef MCCONF_FOC_SL_OPENLOOP_TIME
 #define MCCONF_FOC_SL_OPENLOOP_TIME		0.05	// Time to remain in openloop after ramping (s)
 #endif
+#ifndef MCCONF_FOC_SL_OPENLOOP_BOOST_Q
+#define MCCONF_FOC_SL_OPENLOOP_BOOST_Q	0.0		// Q-axis current boost during the open loop procedure
+#endif
+#ifndef MCCONF_FOC_SL_OPENLOOP_MAX_Q
+#define MCCONF_FOC_SL_OPENLOOP_MAX_Q	-1.0		// Q-axis maximum current during the open loop procedure
+#endif
 #ifndef MCCONF_FOC_SL_OPENLOOP_T_LOCK
 #define MCCONF_FOC_SL_OPENLOOP_T_LOCK	0.0		// Time to lock motor in beginning of open loop sequence
 #endif
@@ -379,14 +385,20 @@
 #ifndef MCCONF_FOC_HFI_VOLTAGE_RUN
 #define MCCONF_FOC_HFI_VOLTAGE_RUN		4 // HFI voltage during tracking
 #endif
+#ifndef MCCONF_FOC_HFI_GAIN
+#define MCCONF_FOC_HFI_GAIN				0.3 // Correction gain for HFI V2
+#endif
+#ifndef MCCONF_FOC_HFI_HYST
+#define MCCONF_FOC_HFI_HYST				0.0 // Sense vector offset hysteresis for HFI V2
+#endif
 #ifndef MCCONF_FOC_HFI_VOLTAGE_MAX
-#define MCCONF_FOC_HFI_VOLTAGE_MAX		10 // HFI voltage during tracking at max current
+#define MCCONF_FOC_HFI_VOLTAGE_MAX		6 // HFI voltage during tracking at max current
 #endif
 #ifndef MCCONF_FOC_SL_ERPM_HFI
-#define MCCONF_FOC_SL_ERPM_HFI			2000.0	// ERPM above which only the observer is used
+#define MCCONF_FOC_SL_ERPM_HFI			3000.0	// ERPM above which only the observer is used
 #endif
 #ifndef MCCONF_FOC_HFI_START_SAMPLES
-#define MCCONF_FOC_HFI_START_SAMPLES	15 // Sample this often at start to resolve ambiguity
+#define MCCONF_FOC_HFI_START_SAMPLES	5 // Sample this often at start to resolve ambiguity
 #endif
 #ifndef MCCONF_FOC_HFI_OBS_OVR_SEC
 #define MCCONF_FOC_HFI_OBS_OVR_SEC		0.001 // Continue using observer for this long when entering HFI speed
@@ -444,6 +456,9 @@
 #endif
 #ifndef MCCONF_FOC_FW_Q_CURRENT_FACTOR
 #define MCCONF_FOC_FW_Q_CURRENT_FACTOR	0.02 // Factor of the FW-current to feed to the Q-axis to slow motor down when setting 0 current
+#endif
+#ifndef MCCONF_FOC_SPEED_SOURCE
+#define MCCONF_FOC_SPEED_SOURCE			SPEED_SRC_OBSERVER // Position source for speed trackers
 #endif
 
 // GPD
