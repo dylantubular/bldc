@@ -600,7 +600,7 @@ void terminal_process_string(char *str) {
 			sscanf(argv[1], "%f", &current);
 			sscanf(argv[2], "%f", &erpm);
 
-			if (current >= 0.0 && erpm >= 0.0) {
+			if (current >= 0.0) {
 				timeout_reset();
 				mcpwm_foc_set_openloop(current, erpm);
 			} else {
